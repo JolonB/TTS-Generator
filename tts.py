@@ -6,14 +6,19 @@ import os
 import requests
 import threading
 import time
+import traceback
 
 import gtts
 import progressbar
 import pydub
+from strfseconds import strfseconds
 
 N_THREADS = 4
-OUTPUT_DIR = "output"
+OUTPUT_DIR = "output/"
 BITRATE = "16k"
+MAX_PER_SEC = 5.0
+
+TIMEOUT_FSTRING = "%h:%m2:%s2"
 
 
 def flatten_arglist(arguments: list):
@@ -24,25 +29,45 @@ def flatten_arglist(arguments: list):
     return arguments_flattened
 
 
-def process_words(words: list, bitrate: str, output_dir: str, progress: list):
+def autoretry_request(word: str) -> io.BytesIO:
+    request = gtts.gTTS(word)
+    mp3_fp = io.BytesIO()
+    success = False
+    timeout = 5
+    while not success:
+        try:
+            request.write_to_fp(mp3_fp)
+            return mp3_fp
+        except Exception as e:
+            print(e)
+            full_traceback = traceback.format_exc()
+            ind = full_traceback.find("https://")
+            requests_url = full_traceback[ind:].split("\n", 1)[0]
+            if not requests_url:
+                raise RuntimeError(
+                    "TTS URL has changed. Full traceback below:\n" f"{full_traceback}"
+                )
+            print(f"Failed request. Reauthenticate at {requests_url}")
+            timeout_str = strfseconds(timeout, formatstring=TIMEOUT_FSTRING, ndecimal=1)
+            print(f"Retrying in {timeout_str}")
+            time.sleep(timeout)
+            timeout = round(timeout * 2, 2)  # double the timeout each loop
+
+
+def process_words(
+    words: list, bitrate: str, output_dir: str, timeout: float, progress: list
+):
     for word in words:
-        mp3_fp = io.BytesIO()
-        success = False
-        request = gtts.gTTS(word)
-        while not success:
-            try:
-                request.write_to_fp(mp3_fp)
-                break
-            except gtts.tts.gTTSError:
-                print("Failed request")
-                time.sleep(600)  # Wait 10 minutes before trying again
+        mp3_fp = autoretry_request(word)
 
         # Jump to start of mp3_fp so AudioSegment knows where to read
         mp3_fp.seek(0)
         audio = pydub.AudioSegment.from_mp3(mp3_fp)
-        audio.export(f"{output_dir}/{word}.mp3", format="mp3", bitrate=bitrate)
+        output_file = os.path.join(output_dir, f"{word}.mp3")
+        audio.export(output_file, format="mp3", bitrate=bitrate)
         # Keep track of current progress
         progress[0] += 1
+        time.sleep(timeout)
 
 
 def update_progressbar(pbar, total_progress):
@@ -57,8 +82,15 @@ def generate_mp3_from_words(
     bitrate=BITRATE,
     progress_bar=True,
     output_dir=OUTPUT_DIR,
+    max_per_second=MAX_PER_SEC,
 ):
+    if not words:
+        raise ValueError("No words to process")
 
+    # The timeout for running each thread
+    thread_timeout = n_threads / max_per_second
+
+    # Split the word lists for each thread
     split_word_list = [words[i::n_threads] for i in range(n_threads)]
 
     threads = []
@@ -68,7 +100,7 @@ def generate_mp3_from_words(
     if progress_bar:
         pbar = progressbar.ProgressBar(max_value=len(words))
         thread = threading.Thread(
-            target=update_progressbar, args=(pbar, progress_values)
+            target=update_progressbar, daemon=True, args=(pbar, progress_values)
         )
         thread.start()
         threads.append(thread)
@@ -76,10 +108,19 @@ def generate_mp3_from_words(
     for index, word_list in enumerate(split_word_list):
         thread = threading.Thread(
             target=process_words,
-            args=(word_list, bitrate, output_dir, progress_values[index]),
+            daemon=True,
+            args=(
+                word_list,
+                bitrate,
+                output_dir,
+                thread_timeout,
+                progress_values[index],
+            ),
         )
         thread.start()
         threads.append(thread)
+        # Offset thread start times so they run at evenly spaced intervals
+        time.sleep(1 / max_per_second)
 
     for thread in threads:
         thread.join()
@@ -99,6 +140,7 @@ def main(args):
     overwrite = args.overwrite
     n_threads = args.threads
     output_dir = args.output_dir
+    max_req_per_sec = args.max_req_per_sec
 
     # Create output directory if it doesn't already exist
     if not os.path.exists(output_dir):
@@ -137,15 +179,23 @@ def main(args):
 
     all_words = list(all_words)
 
-    generate_mp3_from_words(
-        all_words, n_threads=n_threads, bitrate=bitrate, progress_bar=show_progress
-    )
+    try:
+        generate_mp3_from_words(
+            all_words,
+            n_threads=n_threads,
+            bitrate=bitrate,
+            progress_bar=show_progress,
+            max_per_second=max_req_per_sec,
+        )
+    except ValueError:
+        print("No words to process")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="Text to Speech generator",
         description="Uses Googles TTS service to generate mp3 files from a word list",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "-f",
@@ -201,6 +251,14 @@ if __name__ == "__main__":
         type=str,
         default=OUTPUT_DIR,
         help="The directory to output the audio files to.",
+    )
+    parser.add_argument(
+        "--max-per-second",
+        dest="max_req_per_sec",
+        action="store",
+        type=float,
+        default=MAX_PER_SEC,
+        help="The maximum number of requests per second. Google supposedly limits to 5 per second.",
     )
 
     args = parser.parse_args()
