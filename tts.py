@@ -24,6 +24,117 @@ DEFAULT_TLD = "com"
 TIMEOUT_FSTRING = "%h:%m2:%s2"
 
 
+class TextToSpeech:
+    def __init__(
+        self,
+        n_threads=DEFAULT_N_THREADS,
+        bitrate=DEFAULT_BITRATE,
+        progress_bar=True,
+        output_dir=DEFAULT_OUTPUT_DIR,
+        max_per_second=DEFAULT_MAX_PER_SEC,
+        language=DEFAULT_LANGUAGE,
+        locale=DEFAULT_TLD,
+    ):
+        self.n_threads = n_threads
+        self.bitrate = bitrate
+        self.progress_bar = progress_bar
+        self.output_dir = output_dir
+        self.max_per_second = max_per_second
+        self.language = language
+        self.locale = locale
+        self.reset_words()
+        self.reset_progress_tracker()
+
+    def reset_progress_tracker(self):
+        self.progress_tracker = [[0] for _ in range(self.n_threads)]
+
+    def create_progress_bar_thread(
+        self, length: int, thread_timeout: float, thread_list: list
+    ):
+        if self.progress_bar:
+            pbar = progressbar.ProgressBar(max_value=length)
+            thread = threading.Thread(
+                target=self.update_progressbar, daemon=True, args=(pbar, thread_timeout)
+            )
+            thread.start()
+            thread_list.append(thread)
+
+    def create_process_word_thread(
+        self,
+        word_list: list,
+        thread_timeout: float,
+        thread_index: int,
+        thread_list: list,
+    ):
+        thread = threading.Thread(
+            target=self.process_words,
+            daemon=True,
+            args=(word_list, thread_timeout, thread_index),
+        )
+        thread.start()
+        thread_list.append(thread)
+
+    def generate_mp3_from_words(self, words):
+        if not words:
+            raise ValueError("No words to process")
+
+        self.reset_progress_tracker()
+
+        # The timeout for running each thread
+        thread_timeout = self.n_threads / self.max_per_second
+
+        # Split the word lists for each thread
+        split_word_list = [words[i :: self.n_threads] for i in range(self.n_threads)]
+
+        threads = []
+
+        self.create_progress_bar_thread(len(words), thread_timeout, threads)
+
+        for index, word_list in enumerate(split_word_list):
+            self.create_process_word_thread(word_list, thread_timeout, index, threads)
+            # Offset thread start times so they run at evenly spaced intervals
+            time.sleep(1 / self.max_per_second)
+
+        for thread in threads:
+            thread.join()
+
+    def process_words(
+        self,
+        words: list,
+        timeout: float,
+        thread_index: int,
+    ):
+        for word in words:
+            request = gtts.gTTS(word, lang=self.language, tld=self.locale)
+            mp3_fp = autoretry_request(request)
+
+            # Jump to start of mp3_fp so AudioSegment knows where to read
+            mp3_fp.seek(0)
+            audio = pydub.AudioSegment.from_mp3(mp3_fp)
+            output_file = os.path.join(self.output_dir, f"{word}.mp3")
+            audio.export(output_file, format="mp3", bitrate=self.bitrate)
+            # Keep track of current progress
+            self.progress_tracker[thread_index][0] += 1
+            time.sleep(timeout)
+
+    def update_progressbar(self, pbar, timeout):
+        while pbar.value < pbar.max_value:
+            pbar.update(sum(prog[0] for prog in self.progress_tracker))
+            time.sleep(timeout)
+
+    def add_words_from_file(self, filename: str):
+        pass
+
+    def add_words_from_url(self, url: str):
+        pass
+
+    def add_words(self, words: list):
+        pass
+
+    def reset_words(self):
+        self.words = set()
+
+
 def flatten_arglist(arguments: list):
     arguments_flattened = []
     if arguments:
@@ -58,92 +169,36 @@ def autoretry_request(request: gtts.gTTS) -> io.BytesIO:
             timeout = round(timeout * 2, 2)  # double the timeout each loop
 
 
-def process_words(
-    words: list,
-    bitrate: str,
-    output_dir: str,
-    timeout: float,
-    language: str,
-    locale: str,
-    progress: list,
-):
-    for word in words:
-        request = gtts.gTTS(word, lang=language, tld=locale)
-        mp3_fp = autoretry_request(request)
-
-        # Jump to start of mp3_fp so AudioSegment knows where to read
-        mp3_fp.seek(0)
-        audio = pydub.AudioSegment.from_mp3(mp3_fp)
-        output_file = os.path.join(output_dir, f"{word}.mp3")
-        audio.export(output_file, format="mp3", bitrate=bitrate)
-        # Keep track of current progress
-        progress[0] += 1
-        time.sleep(timeout)
-
-
-def update_progressbar(pbar, total_progress):
-    while pbar.value < pbar.max_value:
-        pbar.update(sum(prog[0] for prog in total_progress))
-        time.sleep(1)
-
-
-def generate_mp3_from_words(
-    words,
-    n_threads=DEFAULT_N_THREADS,
-    bitrate=DEFAULT_BITRATE,
-    progress_bar=True,
-    output_dir=DEFAULT_OUTPUT_DIR,
-    max_per_second=DEFAULT_MAX_PER_SEC,
-    language=DEFAULT_LANGUAGE,
-    locale=DEFAULT_TLD,
-):
-    if not words:
-        raise ValueError("No words to process")
-
-    # The timeout for running each thread
-    thread_timeout = n_threads / max_per_second
-
-    # Split the word lists for each thread
-    split_word_list = [words[i::n_threads] for i in range(n_threads)]
-
-    threads = []
-    # Create a mutable reference to the thread progress
-    progress_values = [[0] for _ in range(n_threads)]
-
-    if progress_bar:
-        pbar = progressbar.ProgressBar(max_value=len(words))
-        thread = threading.Thread(
-            target=update_progressbar, daemon=True, args=(pbar, progress_values)
-        )
-        thread.start()
-        threads.append(thread)
-
-    for index, word_list in enumerate(split_word_list):
-        thread = threading.Thread(
-            target=process_words,
-            daemon=True,
-            args=(
-                word_list,
-                bitrate,
-                output_dir,
-                thread_timeout,
-                language,
-                locale,
-                progress_values[index],
-            ),
-        )
-        thread.start()
-        threads.append(thread)
-        # Offset thread start times so they run at evenly spaced intervals
-        time.sleep(1 / max_per_second)
-
-    for thread in threads:
-        thread.join()
-
-
-def parse_word_list(words: list):
+def parse_word_list(words: list) -> list:
     split_words = words.split("\n")
     return [word.lower() for word in split_words if len(word)]
+
+
+def parse_files(files: list) -> list:
+    output = set()
+    for filename in files:
+        try:
+            with open(filename, "r") as file:
+                output.update(parse_word_list(file.read()))
+        except FileNotFoundError:
+            print(f"File {filename} is not found")
+    return output
+
+
+def parse_urls(urls: list) -> list:
+    output = set()
+    for url in urls:
+        try:
+            response = requests.get(url)
+        except requests.exceptions.MissingSchema:
+            print(f"URL {url} is invalid")
+            continue
+
+        if not response.ok:
+            print(f"URL {url} returned {response}")
+            continue
+        output.update(parse_word_list(response.content.decode()))
+    return output
 
 
 def main(args):
@@ -156,6 +211,8 @@ def main(args):
     n_threads = args.threads
     output_dir = args.output_dir
     max_req_per_sec = args.max_req_per_sec
+    language = args.language
+    locale = args.locale
 
     # Create output directory if it doesn't already exist
     if not os.path.exists(output_dir):
@@ -167,25 +224,10 @@ def main(args):
     all_words.update(user_words)
 
     # Add words from local files
-    for filename in filenames:
-        try:
-            with open(filename, "r") as file:
-                all_words.update(parse_word_list(file.read()))
-        except FileNotFoundError:
-            print(f"File {filename} is not found")
+    all_words.update(parse_files(filenames))
 
     # Add words from URLs
-    for url in urls:
-        try:
-            response = requests.get(url)
-        except requests.exceptions.MissingSchema:
-            print(f"URL {url} is invalid")
-            continue
-
-        if not response.ok:
-            print(f"URL {url} returned {response}")
-            continue
-        all_words.update(parse_word_list(response.content.decode()))
+    all_words.update(parse_urls(urls))
 
     if not overwrite:
         existing_files = os.listdir(output_dir)
@@ -194,22 +236,26 @@ def main(args):
 
     all_words = list(all_words)
 
+    tts_runner = TextToSpeech(
+        n_threads=n_threads,
+        bitrate=bitrate,
+        progress_bar=progressbar,
+        output_dir=output_dir,
+        max_per_second=max_req_per_sec,
+        language=language,
+        locale=locale,
+    )
     try:
-        generate_mp3_from_words(
-            all_words,
-            n_threads=n_threads,
-            bitrate=bitrate,
-            progress_bar=show_progress,
-            max_per_second=max_req_per_sec,
-        )
+        tts_runner.generate_mp3_from_words(all_words)
     except ValueError:
         print("No words to process")
 
 
-if __name__ == "__main__":
+def parse_arguments():
     parser = argparse.ArgumentParser(
         prog="Text to Speech generator",
-        description="Uses Googles TTS service to generate mp3 files from a word list",
+        description="Uses Googles TTS service to generate mp3 files from a"
+        " word list",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -273,7 +319,8 @@ if __name__ == "__main__":
         action="store",
         type=float,
         default=DEFAULT_MAX_PER_SEC,
-        help="The maximum number of requests per second. The lower the number, the more words that will be generated before requests are rejected.",
+        help="The maximum number of requests per second. The lower the number,"
+        " the more words that will be generated before requests are rejected.",
     )
     languages = list(gtts.lang.tts_langs().keys())
     parser.add_argument(
@@ -290,13 +337,14 @@ if __name__ == "__main__":
         action="store",
         type=str,
         default=DEFAULT_TLD,
-        help="The accent to generate audio in. More information here: https://gtts.readthedocs.io/en/latest/module.html#localized-accents",
+        help="The accent to generate audio in. More information here:"
+        " https://gtts.readthedocs.io/en/latest/module.html#localized-accents",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_arguments()
 
     main(args)
-
-    filenames = flatten_arglist(args.files)
-    urls = flatten_arglist(args.urls)
-    # main()
