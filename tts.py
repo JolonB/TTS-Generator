@@ -13,10 +13,13 @@ import progressbar
 import pydub
 from strfseconds import strfseconds
 
-N_THREADS = 4
-OUTPUT_DIR = "output/"
-BITRATE = "16k"
-MAX_PER_SEC = 5.0
+# Defaults
+DEFAULT_N_THREADS = 4
+DEFAULT_OUTPUT_DIR = "output/"
+DEFAULT_BITRATE = "16k"
+DEFAULT_MAX_PER_SEC = 5.0
+DEFAULT_LANGUAGE = "en"
+DEFAULT_TLD = "com"
 
 TIMEOUT_FSTRING = "%h:%m2:%s2"
 
@@ -29,8 +32,7 @@ def flatten_arglist(arguments: list):
     return arguments_flattened
 
 
-def autoretry_request(word: str) -> io.BytesIO:
-    request = gtts.gTTS(word)
+def autoretry_request(request: gtts.gTTS) -> io.BytesIO:
     mp3_fp = io.BytesIO()
     success = False
     timeout = 5
@@ -38,16 +40,18 @@ def autoretry_request(word: str) -> io.BytesIO:
         try:
             request.write_to_fp(mp3_fp)
             return mp3_fp
-        except Exception as e:
-            print(e)
-            full_traceback = traceback.format_exc()
-            ind = full_traceback.find("https://")
-            requests_url = full_traceback[ind:].split("\n", 1)[0]
-            if not requests_url:
-                raise RuntimeError(
-                    "TTS URL has changed. Full traceback below:\n" f"{full_traceback}"
-                )
-            print(f"Failed request. Reauthenticate at {requests_url}")
+        except gtts.tts.gTTSError as response_error:
+            print(response_error)
+            if not response_error.rsp.ok:
+                full_traceback = traceback.format_exc()
+                ind = full_traceback.find("https://")
+                requests_url = full_traceback[ind:].split("\n", 1)[0]
+                if not requests_url and not response_error.ok:
+                    raise RuntimeError(
+                        "TTS URL has changed. Full traceback below:\n"
+                        f"{full_traceback}"
+                    )
+                print(f"Failed request. Reauthenticate at {requests_url}")
             timeout_str = strfseconds(timeout, formatstring=TIMEOUT_FSTRING, ndecimal=1)
             print(f"Retrying in {timeout_str}")
             time.sleep(timeout)
@@ -55,10 +59,17 @@ def autoretry_request(word: str) -> io.BytesIO:
 
 
 def process_words(
-    words: list, bitrate: str, output_dir: str, timeout: float, progress: list
+    words: list,
+    bitrate: str,
+    output_dir: str,
+    timeout: float,
+    language: str,
+    locale: str,
+    progress: list,
 ):
     for word in words:
-        mp3_fp = autoretry_request(word)
+        request = gtts.gTTS(word, lang=language, tld=locale)
+        mp3_fp = autoretry_request(request)
 
         # Jump to start of mp3_fp so AudioSegment knows where to read
         mp3_fp.seek(0)
@@ -78,11 +89,13 @@ def update_progressbar(pbar, total_progress):
 
 def generate_mp3_from_words(
     words,
-    n_threads=N_THREADS,
-    bitrate=BITRATE,
+    n_threads=DEFAULT_N_THREADS,
+    bitrate=DEFAULT_BITRATE,
     progress_bar=True,
-    output_dir=OUTPUT_DIR,
-    max_per_second=MAX_PER_SEC,
+    output_dir=DEFAULT_OUTPUT_DIR,
+    max_per_second=DEFAULT_MAX_PER_SEC,
+    language=DEFAULT_LANGUAGE,
+    locale=DEFAULT_TLD,
 ):
     if not words:
         raise ValueError("No words to process")
@@ -114,6 +127,8 @@ def generate_mp3_from_words(
                 bitrate,
                 output_dir,
                 thread_timeout,
+                language,
+                locale,
                 progress_values[index],
             ),
         )
@@ -167,7 +182,7 @@ def main(args):
             print(f"URL {url} is invalid")
             continue
 
-        if response.status_code != 200:
+        if not response.ok:
             print(f"URL {url} returned {response}")
             continue
         all_words.update(parse_word_list(response.content.decode()))
@@ -221,7 +236,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bitrate",
         action="store",
-        default=BITRATE,
+        default=DEFAULT_BITRATE,
         help="The exported bitrate in any format supported by ffmpeg.",
     )
     parser.add_argument(
@@ -240,7 +255,7 @@ if __name__ == "__main__":
         "--threads",
         action="store",
         type=int,
-        default=N_THREADS,
+        default=DEFAULT_N_THREADS,
         help="The number of threads to run when generating audio.",
     )
     parser.add_argument(
@@ -249,7 +264,7 @@ if __name__ == "__main__":
         dest="output_dir",
         action="store",
         type=str,
-        default=OUTPUT_DIR,
+        default=DEFAULT_OUTPUT_DIR,
         help="The directory to output the audio files to.",
     )
     parser.add_argument(
@@ -257,8 +272,25 @@ if __name__ == "__main__":
         dest="max_req_per_sec",
         action="store",
         type=float,
-        default=MAX_PER_SEC,
-        help="The maximum number of requests per second. Google supposedly limits to 5 per second.",
+        default=DEFAULT_MAX_PER_SEC,
+        help="The maximum number of requests per second. The lower the number, the more words that will be generated before requests are rejected.",
+    )
+    languages = list(gtts.lang.tts_langs().keys())
+    parser.add_argument(
+        "--language",
+        action="store",
+        type=str,
+        default=DEFAULT_LANGUAGE,
+        choices=languages,
+        help=f"The language to generate audio in. Options: {languages}",
+        metavar="LANG",
+    )
+    parser.add_argument(
+        "--locale",
+        action="store",
+        type=str,
+        default=DEFAULT_TLD,
+        help="The accent to generate audio in. More information here: https://gtts.readthedocs.io/en/latest/module.html#localized-accents",
     )
 
     args = parser.parse_args()
