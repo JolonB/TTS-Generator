@@ -16,25 +16,25 @@ import requests
 from strfseconds import strfseconds
 
 # Defaults
-DEFAULT_N_THREADS = 4
-DEFAULT_OUTPUT_DIR = "output/"
-DEFAULT_BITRATE = "16k"
-DEFAULT_MAX_PER_SEC = 5.0
-DEFAULT_LANGUAGE = "en"
-DEFAULT_TLD = "com"
+_DEFAULT_N_THREADS = 4
+_DEFAULT_OUTPUT_DIR = "output/"
+_DEFAULT_BITRATE = "16k"
+_DEFAULT_MAX_PER_SEC = 5.0
+_DEFAULT_LANGUAGE = "en"
+_DEFAULT_TLD = "com"
 
-TIMEOUT_FSTRING = "%h:%m2:%s2"
+_TIMEOUT_FSTRING = "%h:%m2:%s2"
 
 
 @dataclasses.dataclass
 class TextToSpeechConfig:
-    bitrate: str = DEFAULT_BITRATE
+    bitrate: str = _DEFAULT_BITRATE
     progress_bar: bool = True
-    output_dir: str = DEFAULT_OUTPUT_DIR
-    n_threads: int = DEFAULT_N_THREADS
-    max_per_second: float = DEFAULT_MAX_PER_SEC
-    language: str = DEFAULT_LANGUAGE
-    locale: str = DEFAULT_TLD
+    output_dir: str = _DEFAULT_OUTPUT_DIR
+    n_threads: int = _DEFAULT_N_THREADS
+    max_per_second: float = _DEFAULT_MAX_PER_SEC
+    language: str = _DEFAULT_LANGUAGE
+    locale: str = _DEFAULT_TLD
 
 
 class TextToSpeech:
@@ -117,6 +117,14 @@ class TextToSpeech:
     def reset_words(self):
         self._words = set()
 
+    @property
+    def config(self) -> TextToSpeechConfig:
+        return copy.copy(self._config)
+
+    @property
+    def words(self) -> list:
+        return sorted(self._words)
+
     def _reset_progress_tracker(self):
         self._progress_tracker = [[0] for _ in range(self._config.n_threads)]
 
@@ -170,7 +178,7 @@ class TextToSpeech:
                         ) from response_error
                     print(f"Failed request. Reauthenticate at {requests_url}")
                 timeout_str = strfseconds(
-                    timeout, formatstring=TIMEOUT_FSTRING, ndecimal=1
+                    timeout, formatstring=_TIMEOUT_FSTRING, ndecimal=1
                 )
                 print(f"Retrying in {timeout_str}")
                 time.sleep(timeout)
@@ -215,7 +223,7 @@ def flatten_arglist(arguments: list):
     return arguments_flattened
 
 
-def main(args):
+def _main(args):
     filenames = flatten_arglist(args.files)
     urls = flatten_arglist(args.urls)
     user_words = flatten_arglist(args.words)
@@ -290,7 +298,7 @@ def parse_arguments():
     parser.add_argument(
         "--bitrate",
         action="store",
-        default=DEFAULT_BITRATE,
+        default=_DEFAULT_BITRATE,
         help="The exported bitrate in any format supported by ffmpeg.",
     )
     parser.add_argument(
@@ -309,7 +317,7 @@ def parse_arguments():
         "--threads",
         action="store",
         type=int,
-        default=DEFAULT_N_THREADS,
+        default=_DEFAULT_N_THREADS,
         help="The number of threads to run when generating audio.",
     )
     parser.add_argument(
@@ -318,7 +326,7 @@ def parse_arguments():
         dest="output_dir",
         action="store",
         type=str,
-        default=DEFAULT_OUTPUT_DIR,
+        default=_DEFAULT_OUTPUT_DIR,
         help="The directory to output the audio files to.",
     )
     parser.add_argument(
@@ -326,7 +334,7 @@ def parse_arguments():
         dest="max_req_per_sec",
         action="store",
         type=float,
-        default=DEFAULT_MAX_PER_SEC,
+        default=_DEFAULT_MAX_PER_SEC,
         help="The maximum number of requests per second. The lower the number,"
         " the more words that will be generated before requests are rejected.",
     )
@@ -335,7 +343,7 @@ def parse_arguments():
         "--language",
         action="store",
         type=str,
-        default=DEFAULT_LANGUAGE,
+        default=_DEFAULT_LANGUAGE,
         choices=languages,
         help=f"The language to generate audio in. Options: {languages}",
         metavar="LANG",
@@ -344,7 +352,7 @@ def parse_arguments():
         "--locale",
         action="store",
         type=str,
-        default=DEFAULT_TLD,
+        default=_DEFAULT_TLD,
         help="The accent to generate audio in. More information here:"
         " https://gtts.readthedocs.io/en/latest/module.html#localized-accents",
     )
@@ -353,4 +361,4 @@ def parse_arguments():
 
 
 if __name__ == "__main__":
-    main(parse_arguments())
+    _main(parse_arguments())

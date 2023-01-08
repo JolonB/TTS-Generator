@@ -18,8 +18,9 @@ You can do this by running:
 ```shell
 sudo apt install ffmpeg
 ```
+## Usage
 
-## Running
+### Command Line
 
 In most cases, you will only need to set either the files, URLs, or words argument.
 You can typically keep the bitrate, threads, output directory, and max requests per second the same.
@@ -81,6 +82,24 @@ optional arguments:
 
 Note that the files provided by the `--files` and `--urls` arguments should be plain text files formatted such that each line contains a word (or phrase) with no other character (i.e. no bullet points before the words or comments after the words).
 An example of a valid file can be found [here](https://raw.githubusercontent.com/dolph/dictionary/master/popular.txt).
+
+## Scripts
+
+You can use the text to speech generator in scripts as well.
+Simply place the `tts.py` file somewhere in your code and import it:
+
+```python
+import tts
+
+tts_gen = tts.TextToSpeech(tts.TextToSpeechConfig())
+tts_gen.add_words(["hello", "world"])
+tts_gen.add_words_from_url("https://example.com/words.txt")
+tts_gen.add_words_from_files(["words1.txt", "words2.txt"])
+
+tts_gen.generate_mp3_files()
+```
+
+However, in most situations, you would be better off using the [`gTTS` library](https://pypi.org/project/gTTS/) instead.
 
 ## Checking Files
 
