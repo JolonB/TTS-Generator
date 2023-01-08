@@ -1,5 +1,13 @@
 #!/usr/bin/env python
 
+"""This module can be used to generate text to speech using Google Translate's
+text-to-speech API in bulk.
+
+This uses the gTTS library to generate audio and pydub to save it.
+The reason you might use this module is to automatically generate a lot of words.
+This module will automatically retry if anything goes wrong when generating audio.
+"""
+
 import argparse
 import copy
 import dataclasses
@@ -8,6 +16,7 @@ import os
 import threading
 import time
 import traceback
+from typing import List
 
 import gtts
 import progressbar
@@ -18,19 +27,36 @@ from strfseconds import strfseconds
 # Defaults
 _DEFAULT_N_THREADS = 4
 _DEFAULT_OUTPUT_DIR = "output/"
+_DEFAULT_FILETYPE = "mp3"
 _DEFAULT_BITRATE = "16k"
 _DEFAULT_MAX_PER_SEC = 5.0
 _DEFAULT_LANGUAGE = "en"
 _DEFAULT_TLD = "com"
 
+# Timeout information formatting
 _TIMEOUT_FSTRING = "%h:%m2:%s2"
 
 
 @dataclasses.dataclass
-class TextToSpeechConfig:
+class TextToSpeechConfig:  # pylint: disable=too-many-instance-attributes
+    """
+    Configuration for the TextToSpeech class.
+
+    Args:
+        bitrate (str): The bitrate of the generated audio.
+        progress_bar (bool): Whether to show a progress bar while generating.
+        output_dir (str): The directory to output the files to.
+        filetype (str): The filetype to write.
+        n_threads (int): The number of threads to run.
+        max_per_second (float): The maximum number of requests per second.
+        language (str): The langauge to generate audio in.
+        locale (str): The locale/accent to generate audio in.
+    """
+
     bitrate: str = _DEFAULT_BITRATE
     progress_bar: bool = True
     output_dir: str = _DEFAULT_OUTPUT_DIR
+    filetype: str = _DEFAULT_FILETYPE
     n_threads: int = _DEFAULT_N_THREADS
     max_per_second: float = _DEFAULT_MAX_PER_SEC
     language: str = _DEFAULT_LANGUAGE
@@ -38,20 +64,48 @@ class TextToSpeechConfig:
 
 
 class TextToSpeech:
-    def __init__(self, config: TextToSpeechConfig, overwrite=False):
+    """
+    Text to Speech generator.
+
+    Accepts words in the form of Python lists, URLs, and files.
+    Generates mp3 files based on the config provided.
+    """
+
+    def __init__(self, config: TextToSpeechConfig, overwrite: bool = False):
+        """Text to speech generator setup.
+
+        Stores the config and initialises an empty word list.
+        If overwrite is False, will create a list of words that have already been
+        generated so they aren't generated again.
+
+        Args:
+            config (TextToSpeechConfig): The settings for this TextToSpeech instance.
+            overwrite (bool, optional): Whether to overwrite existing files in
+                                        the output directory. Defaults to False.
+        """
         self._config = copy.copy(config)  # copy so this can't be changed on the fly
         self.reset_words()
         self._reset_progress_tracker()
 
+        self._existing_files = []
         if not overwrite:
-            existing_files = os.listdir(self._config.output_dir)
-            self._existing_files = set(
-                file.rsplit(".", 1)[0] for file in existing_files
-            )
-        else:
-            self._existing_files = []
+            filename_end = f".{self._config.filetype}"
+            listed_files = os.listdir(self._config.output_dir)
+            for filename in listed_files:
+                if filename.endswith(filename_end):
+                    filename_no_ext = filename.rsplit(filename_end, 1)[0]
+                    self._existing_files.append(filename_no_ext)
 
-    def generate_mp3_files(self):
+    def run(self):
+        """Run the text to speech generator.
+
+        Send requests to the Google TTS server and write the output to files.
+        Automatically retries if a request fails or gets blocked due to
+        excessive requests.
+
+        Raises:
+            ValueError: If there are no words to process.
+        """
         if not self._words:
             raise ValueError("No words to process")
 
@@ -83,22 +137,42 @@ class TextToSpeech:
         for thread in threads:
             thread.join()
 
-    def add_words_from_files(self, filenames: list):
+    def add_words_from_files(self, filenames: List[str]):
+        """Parse a list of files and add words from them.
+
+        Args:
+            filenames (List[str]): The filenames to add words from.
+        """
         for filename in filenames:
             self.add_words_from_file(filename)
 
     def add_words_from_file(self, filename: str):
+        """Parse a file and add words from it.
+
+        Args:
+            filename (str): The filename to add words from.
+        """
         try:
             with open(filename, "r", encoding="utf-8") as file:
                 self.add_words(self._parse_word_list(file.read()))
         except FileNotFoundError:
             print(f"File {filename} is not found")
 
-    def add_words_from_urls(self, urls: list):
+    def add_words_from_urls(self, urls: List[str]):
+        """Download files and add words from them.
+
+        Args:
+            urls (List[str]): The files to download and parse.
+        """
         for url in urls:
             self.add_words_from_url(url)
 
     def add_words_from_url(self, url: str):
+        """Download a file and add the words from it.
+
+        Args:
+            url (str): The file to download and parse.
+        """
         try:
             response = requests.get(url)
         except requests.exceptions.MissingSchema:
@@ -111,18 +185,26 @@ class TextToSpeech:
 
         self.add_words(self._parse_word_list(response.content.decode()))
 
-    def add_words(self, words: list):
+    def add_words(self, words: List[str]):
+        """Add words from a list of words.
+
+        Args:
+            words (List[str]): The list of words to add.
+        """
         self._words.update(words)
 
     def reset_words(self):
+        """Remove all words."""
         self._words = set()
 
     @property
     def config(self) -> TextToSpeechConfig:
+        """Get the configuration."""
         return copy.copy(self._config)
 
     @property
-    def words(self) -> list:
+    def words(self) -> List[str]:
+        """Get the added words."""
         return sorted(self._words)
 
     def _reset_progress_tracker(self):
@@ -185,6 +267,7 @@ class TextToSpeech:
                 timeout = round(timeout * 2, 2)  # double the timeout each loop
 
     def _process_words(self, words: list, timeout: float, thread_index: int):
+        filetype = self._config.filetype
         for word in words:
             request = gtts.gTTS(
                 word, lang=self._config.language, tld=self._config.locale
@@ -194,8 +277,8 @@ class TextToSpeech:
             # Jump to start of mp3_fp so AudioSegment knows where to read
             mp3_fp.seek(0)
             audio = pydub.AudioSegment.from_mp3(mp3_fp)
-            output_file = os.path.join(self._config.output_dir, f"{word}.mp3")
-            audio.export(output_file, format="mp3", bitrate=self._config.bitrate)
+            output_file = os.path.join(self._config.output_dir, f"{word}.{filetype}")
+            audio.export(output_file, format=filetype, bitrate=self._config.bitrate)
             # Keep track of current progress
             self._progress_tracker[thread_index][0] += 1
             time.sleep(timeout)
@@ -206,16 +289,16 @@ class TextToSpeech:
             time.sleep(timeout)
 
     @staticmethod
-    def _parse_words(words: list) -> list:
+    def _parse_words(words: List[str]) -> List[str]:
         return [word for word in words if len(word)]
 
     @staticmethod
-    def _parse_word_list(words: str) -> list:
+    def _parse_word_list(words: str) -> List[str]:
         split_words = words.split("\n")
         return TextToSpeech._parse_words(split_words)
 
 
-def flatten_arglist(arguments: list):
+def _flatten_arglist(arguments: List[List[str]]):
     arguments_flattened = []
     if arguments:
         for argument_list in arguments:
@@ -223,15 +306,16 @@ def flatten_arglist(arguments: list):
     return arguments_flattened
 
 
-def _main(args):
-    filenames = flatten_arglist(args.files)
-    urls = flatten_arglist(args.urls)
-    user_words = flatten_arglist(args.words)
+def _main(args: argparse.Namespace):
+    filenames = _flatten_arglist(args.files)
+    urls = _flatten_arglist(args.urls)
+    user_words = _flatten_arglist(args.words)
     bitrate = args.bitrate
     show_progress = args.show_progress
     overwrite = args.overwrite
     n_threads = args.threads
     output_dir = args.output_dir
+    filetype = args.filetype
     max_req_per_sec = args.max_req_per_sec
     language = args.language
     locale = args.locale
@@ -245,6 +329,7 @@ def _main(args):
             bitrate=bitrate,
             progress_bar=show_progress,
             output_dir=output_dir,
+            filetype=filetype,
             n_threads=n_threads,
             max_per_second=max_req_per_sec,
             language=language,
@@ -260,12 +345,12 @@ def _main(args):
     # Add user words
     tts_runner.add_words(user_words)
     try:
-        tts_runner.generate_mp3_files()
+        tts_runner.run()
     except ValueError:
         print("No words to process")
 
 
-def parse_arguments():
+def _parse_arguments():
     parser = argparse.ArgumentParser(
         prog="Text to Speech generator",
         description="Uses Googles TTS service to generate mp3 files from a"
@@ -330,6 +415,15 @@ def parse_arguments():
         help="The directory to output the audio files to.",
     )
     parser.add_argument(
+        "-t",
+        "--filetype",
+        dest="filetype",
+        action="store",
+        type=str,
+        default=_DEFAULT_FILETYPE,
+        help="The file format of the audio in any format supported by ffmpeg.",
+    )
+    parser.add_argument(
         "--max-per-second",
         dest="max_req_per_sec",
         action="store",
@@ -361,4 +455,4 @@ def parse_arguments():
 
 
 if __name__ == "__main__":
-    _main(parse_arguments())
+    _main(_parse_arguments())
