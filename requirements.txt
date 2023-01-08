@@ -2,4 +2,5 @@ gtts~=2.3.0
 pre-commit~=2.21.0
 progressbar2~=4.2.0
 pydub~=0.25.1
+requests~=2.28.1
 strfseconds==0.0.0b1
