@@ -41,16 +41,21 @@ usage: Text to Speech generator [-h] [-f FILES [FILES ...]] [-u URLS [URLS ...]]
                                 [--max-per-second MAX_REQ_PER_SEC] [--language LANG]
                                 [--locale LOCALE]
 
-Uses Googles TTS service to generate mp3 files from a word list
+Uses Googles TTS service to generate mp3 files from a word list. Outputs files to output_dir
+with the name word.mp3. The word is written to the filename exactly as it appears in the word
+list, so this must be filtered beforehand where necessary.
 
 optional arguments:
   -h, --help            show this help message and exit
   -f FILES [FILES ...], --files FILES [FILES ...]
-                        File(s) to parse words from to generate audio. (default: None)
+                        File(s) to parse words from to generate audio. The words are case
+                        sensitive. (default: None)
   -u URLS [URLS ...], --urls URLS [URLS ...]
-                        URL(s) to parse words from to generate audio. (default: None)
+                        URL(s) to parse words from to generate audio. The words are case
+                        sensitive. (default: None)
   -w WORDS [WORDS ...], --words WORDS [WORDS ...]
-                        Word(s) to generate audio for. (default: None)
+                        Word(s) to generate audio for. The words are case sensitive. (default:
+                        None)
   --bitrate BITRATE     The exported bitrate in any format supported by ffmpeg. (default: 16k)
   --progress            If set, will show a progress bar while running. (default: False)
   --overwrite           If set, any existing files will be generated again and overwritten.
@@ -64,12 +69,11 @@ optional arguments:
                         more words that will be generated before requests are rejected.
                         (default: 5.0)
   --language LANG       The language to generate audio in. Options: ['af', 'ar', 'bg', 'bn',
-                        'bs', 'ca', 'cs', 'da', 'de', 'el', 'en', 'es', 'et', 'fi', 'fr',
-                        'gu', 'hi', 'hr', 'hu', 'id', 'is', 'it', 'iw', 'ja', 'jw', 'km',
-                        'kn', 'ko', 'la', 'lv', 'ml', 'mr', 'ms', 'my', 'ne', 'nl', 'no',
-                        'pl', 'pt', 'ro', 'ru', 'si', 'sk', 'sq', 'sr', 'su', 'sv', 'sw',
-                        'ta', 'te', 'th', 'tl', 'tr', 'uk', 'ur', 'vi', 'zh-CN', 'zh-TW',
-                        'zh'] (default: en)
+                        'bs', 'ca', 'cs', 'da', 'de', 'el', 'en', 'es', 'et', 'fi', 'fr', 'gu',
+                        'hi', 'hr', 'hu', 'id', 'is', 'it', 'iw', 'ja', 'jw', 'km', 'kn', 'ko',
+                        'la', 'lv', 'ml', 'mr', 'ms', 'my', 'ne', 'nl', 'no', 'pl', 'pt', 'ro',
+                        'ru', 'si', 'sk', 'sq', 'sr', 'su', 'sv', 'sw', 'ta', 'te', 'th', 'tl',
+                        'tr', 'uk', 'ur', 'vi', 'zh-CN', 'zh-TW', 'zh'] (default: en)
   --locale LOCALE       The accent to generate audio in. More information here:
                         https://gtts.readthedocs.io/en/latest/module.html#localized-accents
                         (default: com)
@@ -77,3 +81,32 @@ optional arguments:
 
 Note that the files provided by the `--files` and `--urls` arguments should be plain text files formatted such that each line contains a word (or phrase) with no other character (i.e. no bullet points before the words or comments after the words).
 An example of a valid file can be found [here](https://raw.githubusercontent.com/dolph/dictionary/master/popular.txt).
+
+## Checking Files
+
+After running, you may want to check that all of the files are valid MP3 files.
+You can do so with the `mp3val` tool which can be installed with:
+
+```shell
+sudo apt install mp3val
+```
+
+You can run it with:
+
+```shell
+mp3val output/*.mp3 -lresults.txt
+```
+
+Any errors will be found in results.txt.
+You can find them by searching for `WARN` or `ERROR`.
+You can safely ignore the `INFO`.
+
+I'd also recommened running
+
+```shell
+find output/ -size 0
+```
+
+to find any files that are empty, because `mp3val` might miss these.
+
+`mp3val` can fix invalid files by setting `-f`, but it may be better to just delete the corrupt files and run `./tts.py` again.

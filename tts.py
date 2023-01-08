@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 
 import argparse
+import copy
+import dataclasses
 import io
 import os
-import requests
 import threading
 import time
 import traceback
@@ -11,6 +12,7 @@ import traceback
 import gtts
 import progressbar
 import pydub
+import requests
 from strfseconds import strfseconds
 
 # Defaults
@@ -24,42 +26,114 @@ DEFAULT_TLD = "com"
 TIMEOUT_FSTRING = "%h:%m2:%s2"
 
 
+@dataclasses.dataclass
+class TextToSpeechConfig:
+    bitrate: str = DEFAULT_BITRATE
+    progress_bar: bool = True
+    output_dir: str = DEFAULT_OUTPUT_DIR
+    n_threads: int = DEFAULT_N_THREADS
+    max_per_second: float = DEFAULT_MAX_PER_SEC
+    language: str = DEFAULT_LANGUAGE
+    locale: str = DEFAULT_TLD
+
+
 class TextToSpeech:
-    def __init__(
-        self,
-        n_threads=DEFAULT_N_THREADS,
-        bitrate=DEFAULT_BITRATE,
-        progress_bar=True,
-        output_dir=DEFAULT_OUTPUT_DIR,
-        max_per_second=DEFAULT_MAX_PER_SEC,
-        language=DEFAULT_LANGUAGE,
-        locale=DEFAULT_TLD,
-    ):
-        self.n_threads = n_threads
-        self.bitrate = bitrate
-        self.progress_bar = progress_bar
-        self.output_dir = output_dir
-        self.max_per_second = max_per_second
-        self.language = language
-        self.locale = locale
+    def __init__(self, config: TextToSpeechConfig, overwrite=False):
+        self._config = copy.copy(config)  # copy so this can't be changed on the fly
         self.reset_words()
-        self.reset_progress_tracker()
+        self._reset_progress_tracker()
 
-    def reset_progress_tracker(self):
-        self.progress_tracker = [[0] for _ in range(self.n_threads)]
+        if not overwrite:
+            existing_files = os.listdir(self._config.output_dir)
+            self._existing_files = set(
+                file.rsplit(".", 1)[0] for file in existing_files
+            )
+        else:
+            self._existing_files = []
 
-    def create_progress_bar_thread(
+    def generate_mp3_files(self):
+        if not self._words:
+            raise ValueError("No words to process")
+
+        # Filter out words that we don't want to overwrite
+        words = self._words.difference(self._existing_files)
+
+        # Convert words to something indexable
+        words = list(words)
+
+        self._reset_progress_tracker()
+
+        # The timeout for running each thread
+        thread_timeout = self._config.n_threads / self._config.max_per_second
+
+        # Split the word lists for each thread
+        split_word_list = [
+            words[i :: self._config.n_threads] for i in range(self._config.n_threads)
+        ]
+
+        threads = []
+
+        self._create_progress_bar_thread(len(words), thread_timeout, threads)
+
+        for index, word_list in enumerate(split_word_list):
+            self._create_process_word_thread(word_list, thread_timeout, index, threads)
+            # Offset thread start times so they run at evenly spaced intervals
+            time.sleep(1 / self._config.max_per_second)
+
+        for thread in threads:
+            thread.join()
+
+    def add_words_from_files(self, filenames: list):
+        for filename in filenames:
+            self.add_words_from_file(filename)
+
+    def add_words_from_file(self, filename: str):
+        try:
+            with open(filename, "r", encoding="utf-8") as file:
+                self.add_words(self._parse_word_list(file.read()))
+        except FileNotFoundError:
+            print(f"File {filename} is not found")
+
+    def add_words_from_urls(self, urls: list):
+        for url in urls:
+            self.add_words_from_url(url)
+
+    def add_words_from_url(self, url: str):
+        try:
+            response = requests.get(url)
+        except requests.exceptions.MissingSchema:
+            print(f"URL {url} is invalid")
+            return
+
+        if not response.ok:
+            print(f"URL {url} returned {response}")
+            return
+
+        self.add_words(self._parse_word_list(response.content.decode()))
+
+    def add_words(self, words: list):
+        self._words.update(words)
+
+    def reset_words(self):
+        self._words = set()
+
+    def _reset_progress_tracker(self):
+        self._progress_tracker = [[0] for _ in range(self._config.n_threads)]
+
+    def _create_progress_bar_thread(
         self, length: int, thread_timeout: float, thread_list: list
     ):
-        if self.progress_bar:
+        if self._config.progress_bar:
             pbar = progressbar.ProgressBar(max_value=length)
             thread = threading.Thread(
-                target=self.update_progressbar, daemon=True, args=(pbar, thread_timeout)
+                target=self._update_progressbar,
+                daemon=True,
+                args=(pbar, thread_timeout),
             )
             thread.start()
             thread_list.append(thread)
 
-    def create_process_word_thread(
+    def _create_process_word_thread(
         self,
         word_list: list,
         thread_timeout: float,
@@ -67,72 +141,70 @@ class TextToSpeech:
         thread_list: list,
     ):
         thread = threading.Thread(
-            target=self.process_words,
+            target=self._process_words,
             daemon=True,
             args=(word_list, thread_timeout, thread_index),
         )
         thread.start()
         thread_list.append(thread)
 
-    def generate_mp3_from_words(self, words):
-        if not words:
-            raise ValueError("No words to process")
+    @staticmethod
+    def _autoretry_request(request: gtts.gTTS) -> io.BytesIO:
+        mp3_fp = io.BytesIO()
+        success = False
+        timeout = 5
+        while not success:
+            try:
+                request.write_to_fp(mp3_fp)
+                return mp3_fp
+            except gtts.tts.gTTSError as response_error:
+                print(response_error)
+                if not response_error.rsp.ok:
+                    full_traceback = traceback.format_exc()
+                    ind = full_traceback.find("https://")
+                    requests_url = full_traceback[ind:].split("\n", 1)[0]
+                    if not requests_url and not response_error.ok:
+                        raise RuntimeError(
+                            "TTS URL has changed. Full traceback below:\n"
+                            f"{full_traceback}"
+                        ) from response_error
+                    print(f"Failed request. Reauthenticate at {requests_url}")
+                timeout_str = strfseconds(
+                    timeout, formatstring=TIMEOUT_FSTRING, ndecimal=1
+                )
+                print(f"Retrying in {timeout_str}")
+                time.sleep(timeout)
+                timeout = round(timeout * 2, 2)  # double the timeout each loop
 
-        self.reset_progress_tracker()
-
-        # The timeout for running each thread
-        thread_timeout = self.n_threads / self.max_per_second
-
-        # Split the word lists for each thread
-        split_word_list = [words[i :: self.n_threads] for i in range(self.n_threads)]
-
-        threads = []
-
-        self.create_progress_bar_thread(len(words), thread_timeout, threads)
-
-        for index, word_list in enumerate(split_word_list):
-            self.create_process_word_thread(word_list, thread_timeout, index, threads)
-            # Offset thread start times so they run at evenly spaced intervals
-            time.sleep(1 / self.max_per_second)
-
-        for thread in threads:
-            thread.join()
-
-    def process_words(
-        self,
-        words: list,
-        timeout: float,
-        thread_index: int,
-    ):
+    def _process_words(self, words: list, timeout: float, thread_index: int):
         for word in words:
-            request = gtts.gTTS(word, lang=self.language, tld=self.locale)
-            mp3_fp = autoretry_request(request)
+            request = gtts.gTTS(
+                word, lang=self._config.language, tld=self._config.locale
+            )
+            mp3_fp = self._autoretry_request(request)
 
             # Jump to start of mp3_fp so AudioSegment knows where to read
             mp3_fp.seek(0)
             audio = pydub.AudioSegment.from_mp3(mp3_fp)
-            output_file = os.path.join(self.output_dir, f"{word}.mp3")
-            audio.export(output_file, format="mp3", bitrate=self.bitrate)
+            output_file = os.path.join(self._config.output_dir, f"{word}.mp3")
+            audio.export(output_file, format="mp3", bitrate=self._config.bitrate)
             # Keep track of current progress
-            self.progress_tracker[thread_index][0] += 1
+            self._progress_tracker[thread_index][0] += 1
             time.sleep(timeout)
 
-    def update_progressbar(self, pbar, timeout):
+    def _update_progressbar(self, pbar, timeout):
         while pbar.value < pbar.max_value:
-            pbar.update(sum(prog[0] for prog in self.progress_tracker))
+            pbar.update(sum(prog[0] for prog in self._progress_tracker))
             time.sleep(timeout)
 
-    def add_words_from_file(self, filename: str):
-        pass
+    @staticmethod
+    def _parse_words(words: list) -> list:
+        return [word for word in words if len(word)]
 
-    def add_words_from_url(self, url: str):
-        pass
-
-    def add_words(self, words: list):
-        pass
-
-    def reset_words(self):
-        self.words = set()
+    @staticmethod
+    def _parse_word_list(words: str) -> list:
+        split_words = words.split("\n")
+        return TextToSpeech._parse_words(split_words)
 
 
 def flatten_arglist(arguments: list):
@@ -141,64 +213,6 @@ def flatten_arglist(arguments: list):
         for argument_list in arguments:
             arguments_flattened.extend(argument_list)
     return arguments_flattened
-
-
-def autoretry_request(request: gtts.gTTS) -> io.BytesIO:
-    mp3_fp = io.BytesIO()
-    success = False
-    timeout = 5
-    while not success:
-        try:
-            request.write_to_fp(mp3_fp)
-            return mp3_fp
-        except gtts.tts.gTTSError as response_error:
-            print(response_error)
-            if not response_error.rsp.ok:
-                full_traceback = traceback.format_exc()
-                ind = full_traceback.find("https://")
-                requests_url = full_traceback[ind:].split("\n", 1)[0]
-                if not requests_url and not response_error.ok:
-                    raise RuntimeError(
-                        "TTS URL has changed. Full traceback below:\n"
-                        f"{full_traceback}"
-                    )
-                print(f"Failed request. Reauthenticate at {requests_url}")
-            timeout_str = strfseconds(timeout, formatstring=TIMEOUT_FSTRING, ndecimal=1)
-            print(f"Retrying in {timeout_str}")
-            time.sleep(timeout)
-            timeout = round(timeout * 2, 2)  # double the timeout each loop
-
-
-def parse_word_list(words: list) -> list:
-    split_words = words.split("\n")
-    return [word.lower() for word in split_words if len(word)]
-
-
-def parse_files(files: list) -> list:
-    output = set()
-    for filename in files:
-        try:
-            with open(filename, "r") as file:
-                output.update(parse_word_list(file.read()))
-        except FileNotFoundError:
-            print(f"File {filename} is not found")
-    return output
-
-
-def parse_urls(urls: list) -> list:
-    output = set()
-    for url in urls:
-        try:
-            response = requests.get(url)
-        except requests.exceptions.MissingSchema:
-            print(f"URL {url} is invalid")
-            continue
-
-        if not response.ok:
-            print(f"URL {url} returned {response}")
-            continue
-        output.update(parse_word_list(response.content.decode()))
-    return output
 
 
 def main(args):
@@ -218,35 +232,27 @@ def main(args):
     if not os.path.exists(output_dir):
         os.mkdir(output_dir)
 
-    all_words = set()
-
-    # Add user words
-    all_words.update(user_words)
+    tts_runner = TextToSpeech(
+        TextToSpeechConfig(
+            bitrate=bitrate,
+            progress_bar=show_progress,
+            output_dir=output_dir,
+            n_threads=n_threads,
+            max_per_second=max_req_per_sec,
+            language=language,
+            locale=locale,
+        ),
+        overwrite=overwrite,
+    )
 
     # Add words from local files
-    all_words.update(parse_files(filenames))
-
+    tts_runner.add_words_from_files(filenames)
     # Add words from URLs
-    all_words.update(parse_urls(urls))
-
-    if not overwrite:
-        existing_files = os.listdir(output_dir)
-        existing_files = set(file.rsplit(".", 1)[0] for file in existing_files)
-        all_words.difference_update(existing_files)
-
-    all_words = list(all_words)
-
-    tts_runner = TextToSpeech(
-        n_threads=n_threads,
-        bitrate=bitrate,
-        progress_bar=progressbar,
-        output_dir=output_dir,
-        max_per_second=max_req_per_sec,
-        language=language,
-        locale=locale,
-    )
+    tts_runner.add_words_from_urls(urls)
+    # Add user words
+    tts_runner.add_words(user_words)
     try:
-        tts_runner.generate_mp3_from_words(all_words)
+        tts_runner.generate_mp3_files()
     except ValueError:
         print("No words to process")
 
@@ -255,7 +261,9 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         prog="Text to Speech generator",
         description="Uses Googles TTS service to generate mp3 files from a"
-        " word list",
+        " word list. Outputs files to output_dir with the name word.mp3. The"
+        " word is written to the filename exactly as it appears in the word"
+        " list, so this must be filtered beforehand where necessary.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -263,21 +271,21 @@ def parse_arguments():
         "--files",
         action="append",
         nargs="+",
-        help="File(s) to parse words from to generate audio.",
+        help="File(s) to parse words from to generate audio. The words are case sensitive.",
     )
     parser.add_argument(
         "-u",
         "--urls",
         action="append",
         nargs="+",
-        help="URL(s) to parse words from to generate audio.",
+        help="URL(s) to parse words from to generate audio. The words are case sensitive.",
     )
     parser.add_argument(
         "-w",
         "--words",
         action="append",
         nargs="+",
-        help="Word(s) to generate audio for.",
+        help="Word(s) to generate audio for. The words are case sensitive.",
     )
     parser.add_argument(
         "--bitrate",
@@ -345,6 +353,4 @@ def parse_arguments():
 
 
 if __name__ == "__main__":
-    args = parse_arguments()
-
-    main(args)
+    main(parse_arguments())
