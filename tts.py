@@ -241,9 +241,8 @@ class TextToSpeech:
     @staticmethod
     def _autoretry_request(request: gtts.gTTS) -> io.BytesIO:
         mp3_fp = io.BytesIO()
-        success = False
         timeout = 5
-        while not success:
+        while True:
             try:
                 request.write_to_fp(mp3_fp)
                 return mp3_fp
